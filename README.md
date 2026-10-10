@@ -13,6 +13,16 @@ Plain HTML, CSS and JavaScript. No server, no build step, no login. Everything i
 4. Tap **Plan best route**. Reorder or lock a stop as **First** or **Last** and re-plan if needed.
 5. Tap **Start delivering**. **Navigate** opens Google Maps to the next home; tick **Delivered** as you go. **Skip for now** moves a home to the end. **Undo last** reverses a tick.
 
+### Electric car
+
+Open **Electric car** on the Stops screen and switch it on. Enter the battery % when you leave, the range your car shows (km), the lowest % you want left, and a safety margin (dashboard range is optimistic in city traffic).
+
+- The route shows the battery % you arrive with at every stop, and the % used in total. It warns if the battery would drop below your reserve, or run out, and names the stop.
+- **Finish at a charging station** (on by default): the planner tries the nearest known chargers and picks the one that makes the whole trip shortest (every home, then the charger, then home). You can force a specific charger from the list.
+- After the last delivery, **On the road** sends you to the charger, then home.
+- Chargers come from OpenStreetMap. In smaller cities the data is thin, so use **Add a charger** and drop a pin on one you know. Pinned chargers are kept in your backup.
+- It does not add a mid-route charging stop. If the warning says the battery would run out early, charge before you leave or start with more battery.
+
 Use **Save backup** to download your stops as a file and **Restore backup** to load them on another phone.
 
 ## Free map or Google
@@ -37,7 +47,7 @@ Create an API key and, under restrictions, limit it to websites and add this sit
 ## Tests
 
 ```bash
-node --test tests/solver.test.js tests/geo.test.js
+node --test tests/solver.test.js tests/geo.test.js tests/ev.test.js
 ```
 
 ## Files
@@ -47,4 +57,6 @@ node --test tests/solver.test.js tests/geo.test.js
 - `js/maps.js`: Google Maps provider
 - `js/osm.js`: free OpenStreetMap provider (same interface)
 - `js/geo.js`: reads positions from pasted map links and coordinates
+- `js/ev.js`: battery maths (% per km, battery at each stop)
+- `js/chargers.js`: finds public chargers from OpenStreetMap
 - `js/app.js`: screens and saved state

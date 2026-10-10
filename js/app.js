@@ -9,6 +9,8 @@
   var adjustId = null;
   var adjustOff = null;
   var pinMode = false;
+  var pinKind = 'stop';
+  var chargerBusy = false;
   var stopPinListener = null;
   var undoStack = [];
   var refreshToken = 0;
@@ -19,7 +21,10 @@
   /* ---------- state ---------- */
 
   function blank() {
-    return { provider: 'osm', apiKey: '', start: null, returnHome: true, stops: [], order: [], route: null, view: 'setup' };
+    return {
+      provider: 'osm', apiKey: '', start: null, returnHome: true, stops: [], order: [], route: null, view: 'setup',
+      ev: Ev.withDefaults(), chargers: [], charger: null, chargerId: null, chargeDone: false
+    };
   }
   function load() {
     var s = blank();
@@ -31,7 +36,9 @@
         if (s.provider !== 'google') s.provider = 'osm';
         if (!Array.isArray(s.stops)) s.stops = [];
         if (!Array.isArray(s.order)) s.order = [];
+        if (!Array.isArray(s.chargers)) s.chargers = [];
       }
+      s.ev = Ev.withDefaults(s.ev);
     } catch (e) { /* storage blocked or corrupt: start fresh */ }
     if (s.view === 'planning' || VIEWS.indexOf(s.view) < 0) s.view = s.start ? 'stops' : 'setup';
     return s;
@@ -123,6 +130,17 @@
       G.addMarker(s, o);
       pts.push(s);
     });
+    var active = activeCharger();
+    if (S.ev.enabled) {
+      chargersByDistance().slice(0, 40).forEach(function (c) {
+        if (active && c.id === active.id) return;
+        G.addMarker(c, { fill: '#0B6E4F', scale: 8, label: 'E', title: c.name, z: 2 });
+      });
+    }
+    if (active) {
+      G.addMarker(active, { fill: '#0B6E4F', scale: 13, label: 'E', title: 'Charge here: ' + active.name, z: 5 });
+      pts.push(active);
+    }
     if (opts.messy && opts.messy.length) {
       var path = [S.start].concat(opts.messy);
       if (S.returnHome) path.push(S.start);
@@ -237,6 +255,7 @@
       '<button class="iconbtn' + (pinMode ? ' on' : '') + '" data-act="pin" type="button" aria-label="Drop a pin on the map" aria-pressed="' + pinMode + '">' + icon('pin') + '</button>' +
       '<button class="iconbtn" data-act="paste" type="button" aria-label="Paste a list of addresses">' + icon('paste') + '</button></div>' +
       '<ul class="list" id="stoplist"></ul>' +
+      '<div id="evpanel"></div>' +
       '<div class="more">' +
       '<button class="link" data-act="setup" type="button">Start point and key</button>' +
       '<button class="link" data-act="backup" type="button">Save backup</button>' +
@@ -245,6 +264,7 @@
       '<input type="file" id="restorefile" accept="application/json" hidden></div>' +
       '<div class="actions"><button class="btn primary grow" data-act="plan" type="button">Plan best route</button></div>';
     renderStopList();
+    renderEv();
     mountSearch();
   }
 
@@ -302,21 +322,102 @@
     drawMap();
   }
 
-  function setPinMode(on) {
+  function setPinMode(on, kind) {
     pinMode = on;
     document.body.classList.toggle('pinning', on);
-    if (on) showHint('Tap the map to add a stop', false); else if (!adjustId) showHint('', false);
+    pinKind = kind || 'stop';
+    if (on) showHint(pinKind === 'charger' ? 'Tap the map where the charging station is' : 'Tap the map to add a stop', false);
+    else if (!adjustId) showHint('', false);
     var btn = $('[data-act="pin"]');
-    if (btn) { btn.classList.toggle('on', on); btn.setAttribute('aria-pressed', on); }
+    if (btn) { btn.classList.toggle('on', on && pinKind === 'stop'); btn.setAttribute('aria-pressed', on && pinKind === 'stop'); }
     if (stopPinListener) { stopPinListener(); stopPinListener = null; }
     if (on && mapReady) {
+      var kindNow = pinKind;
       stopPinListener = G.onMapClick(async function (pos) {
-        var a = { name: 'Pinned spot', address: pos.lat.toFixed(5) + ', ' + pos.lng.toFixed(5) };
-        try { var g = await G.reverseGeocode(pos); a.address = g.address; a.name = g.address.split(',')[0]; } catch (e) { /* keep coordinates */ }
-        addStop({ name: a.name, address: a.address, lat: pos.lat, lng: pos.lng });
+        var a = { name: kindNow === 'charger' ? 'My charger' : 'Pinned spot', address: pos.lat.toFixed(5) + ', ' + pos.lng.toFixed(5) };
+        try {
+          var g = await G.reverseGeocode(pos);
+          a.address = g.address;
+          if (kindNow === 'stop') a.name = g.address.split(',')[0];
+        } catch (e) { /* keep coordinates */ }
+        if (kindNow === 'charger') addManualCharger({ name: a.name, address: a.address, lat: pos.lat, lng: pos.lng });
+        else addStop({ name: a.name, address: a.address, lat: pos.lat, lng: pos.lng });
         setPinMode(false);
       });
     }
+  }
+
+  /* ---------- electric car ---------- */
+
+  function chargersByDistance() {
+    if (!S.start) return S.chargers.slice();
+    return S.chargers.map(function (c) { return Object.assign({}, c, { dist: Solver.haversine(S.start, c) }); })
+      .sort(function (a, b) { return a.dist - b.dist; });
+  }
+
+  function numField(key, label, min, max) {
+    return '<div class="field"><label for="ev-' + key + '">' + label + '</label>' +
+      '<input id="ev-' + key + '" type="number" inputmode="decimal" min="' + min + '" max="' + max + '" step="1" value="' + esc(S.ev[key]) + '" data-ev="' + key + '"></div>';
+  }
+
+  function evSwitch(key, title, sub) {
+    return '<label class="switch"><span><span style="font-weight:500;display:block">' + title + '</span><span class="muted">' + sub + '</span></span>' +
+      '<input type="checkbox" data-ev="' + key + '"' + (S.ev[key] ? ' checked' : '') + '><span class="t"></span></label>';
+  }
+
+  function renderEv() {
+    var box = $('#evpanel');
+    if (!box) return;
+    var ev = S.ev;
+    var html = '<details class="help ev"' + (ev.enabled ? ' open' : '') + '><summary>Electric car' + (ev.enabled ? ' <span class="badge">On</span>' : '') + '</summary>' +
+      '<div class="evbody">' + evSwitch('enabled', 'Plan for an electric car', 'Battery % at every stop, and finish at a charger');
+    if (ev.enabled) {
+      var bad = Ev.problem(ev);
+      html += '<div class="evgrid">' + numField('pct', 'Battery at start (%)', 1, 100) + numField('rangeKm', 'Range shown (km)', 1, 1500) +
+        numField('reservePct', 'Keep at least (%)', 0, 90) + numField('marginPct', 'Safety margin (%)', 0, 60) + '</div>' +
+        (bad ? '<div class="status bad">' + esc(bad) + '</div>' : '') +
+        evSwitch('endAtCharger', 'Finish at a charging station', 'Deliver everything, charge, then go home');
+      if (ev.endAtCharger) {
+        var list = chargersByDistance();
+        html += numField('chargeTo', 'Charge up to (%)', 10, 100) +
+          '<div class="field"><span class="lbl">Charging stations</span>' +
+          '<span class="muted">' + (list.length ? list.length + ' known near your route. The best one is picked for you.' : 'None known yet. Search the map, or drop a pin where one is.') + '</span>' +
+          '<div class="row"><button class="btn small" data-act="findchargers" type="button"' + (chargerBusy ? ' aria-disabled="true"' : '') + '>' + (chargerBusy ? 'Searching…' : 'Find chargers nearby') + '</button>' +
+          '<button class="btn small" data-act="addcharger" type="button">Add a charger</button></div>' +
+          (list.length ? '<ul class="list chg"><li><button class="osmpick" type="button" data-act="pickcharger" data-id="" aria-pressed="' + !S.chargerId + '"><span class="osmname">Auto</span><span class="ad">The one that adds the least distance</span></button></li>' +
+            list.slice(0, 6).map(function (c) {
+              return '<li><button class="osmpick" type="button" data-act="pickcharger" data-id="' + esc(c.id) + '" aria-pressed="' + (S.chargerId === c.id) + '"><span class="osmname">' + esc(c.name) + (c.manual ? ' (your pin)' : '') + '</span>' +
+                '<span class="ad">' + (c.kw ? 'Up to ' + c.kw + ' kW · ' : '') + fmtKm(c.dist) + ' from start</span></button></li>';
+            }).join('') + '</ul>' : '') + '</div>';
+      }
+    }
+    box.innerHTML = html + '</div></details>';
+  }
+
+  async function loadChargers() {
+    var found = await Chargers.fetchChargers(Chargers.bboxAround([S.start].concat(S.stops), 10));
+    S.chargers = found.concat(S.chargers.filter(function (c) { return c.manual; }));
+    save();
+    return found.length;
+  }
+
+  async function findChargers() {
+    if (!S.start) { toast('Set your start point first.'); return; }
+    if (chargerBusy) return;
+    chargerBusy = true; renderEv();
+    try {
+      var n = await loadChargers();
+      toast(n ? n + ' charging stations found' : 'No charging stations in the map data nearby. Tap "Add a charger" and drop a pin.');
+    } catch (e) { toast(e.message); }
+    chargerBusy = false;
+    renderEv();
+    drawMap({ keep: true });
+  }
+
+  function addManualCharger(c) {
+    S.chargers.push({ id: 'm' + Date.now().toString(36), name: c.name, operator: '', address: c.address, lat: c.lat, lng: c.lng, kw: null, sockets: null, manual: true });
+    S.route = null; save(); renderEv(); drawMap({ keep: true });
+    toast('Charger added');
   }
 
   /* ---------- place a pin exactly ---------- */
@@ -421,16 +522,35 @@
     if (!S.start) { toast('Set your start point first.'); setView('setup'); return; }
     if (!mapReady) { toast('Connect your Google Maps key first.'); setView('setup'); return; }
     if (pend.length < 2) { toast('Add at least two homes to plan a route.'); return; }
+    if (S.ev.enabled) {
+      var bad = Ev.problem(S.ev);
+      if (bad) { toast(bad); return; }
+    }
 
     S.view = 'planning';
+    S.charger = null; S.chargeDone = false;
     render();
     drawMap({ messy: pend });
     await sleep(80);
 
-    var res = Solver.planRoute(S.start, pend, {
+    var opts = {
       returnHome: S.returnHome, firstId: lockedId('first'), lastId: lockedId('last'),
       userOrder: pend.map(function (s) { return s.id; })
-    });
+    };
+    var res = null;
+    if (S.ev.enabled && S.ev.endAtCharger) {
+      if (!S.chargers.some(function (c) { return !c.manual; })) {
+        try { await loadChargers(); } catch (e) { toast(e.message); }
+      }
+      if (S.chargers.length) {
+        var pick = Solver.chooseCharger(S.start, pend, S.chargers, Object.assign({ chargerId: S.chargerId }, opts));
+        if (pick) { S.charger = pick.charger; res = pick.result; }
+      } else {
+        toast('No charging stations found nearby. In the Electric car box, tap "Add a charger" and drop a pin.');
+      }
+    }
+    if (!res) res = Solver.planRoute(S.start, pend, opts);
+    var userEl = $('#pl-user'); if (userEl) userEl.textContent = fmtKm(res.userKm);
     var doneIds = S.order.filter(function (id) { var s = byId(id); return s && s.done; });
     S.stops.forEach(function (s) { if (s.done && doneIds.indexOf(s.id) < 0) doneIds.push(s.id); });
     S.order = doneIds.concat(res.order);
@@ -466,7 +586,7 @@
     viewEl.innerHTML =
       '<div class="sheet"><div class="row" style="gap:14px"><div class="spin"></div><div>' +
       '<h2 id="pl-msg">Trying shorter orders…</h2><p class="muted">Checking ' + pend.length + ' homes. This takes a few seconds.</p></div></div>' +
-      '<div class="twocol"><div><div class="muted">Your order</div><div class="kmbig bad">' + fmtKm(userKm) + '</div></div>' +
+      '<div class="twocol"><div><div class="muted">Your order</div><div class="kmbig bad" id="pl-user">' + fmtKm(userKm) + '</div></div>' +
       '<div><div class="muted">Best so far</div><div class="kmbig best" id="pl-best">' + fmtKm(userKm) + '</div></div></div>' +
       '<div class="bar"><div id="pl-bar" style="width:4%"></div></div></div>' +
       '<p class="muted" style="text-align:center">The red dashed line on the map is the order you entered.</p>';
@@ -478,7 +598,8 @@
     var token = ++refreshToken;
     var pend = pendingOrdered();
     if (!pend.length) { S.route = { km: 0, seconds: 0, legs: [], path: null, source: 'estimate' }; return; }
-    var pts = [S.start].concat(pend);
+    var pts = [originPoint()].concat(pend);
+    if (activeCharger()) pts.push(activeCharger());
     if (S.returnHome) pts.push(S.start);
     var legs = [], km = 0;
     for (var i = 0; i + 1 < pts.length; i++) {
@@ -501,6 +622,40 @@
 
   /* ---------- route view ---------- */
 
+  function activeCharger() {
+    return S.ev.enabled && S.ev.endAtCharger && S.charger ? S.charger : null;
+  }
+
+  /* Where the car is now: the last home delivered, or the start if none yet. Done stops are always a prefix of the order. */
+  function originPoint() {
+    var last = null;
+    S.order.forEach(function (id) { var s = byId(id); if (s && s.done) last = s; });
+    return last || S.start;
+  }
+
+  /* Battery already used on legs driven so far (each delivery records the leg that led to it). */
+  function usedPct() {
+    var km = 0;
+    S.stops.forEach(function (s) { if (s.done && s.legKm) km += s.legKm; });
+    return S.ev.enabled && !Ev.problem(S.ev) ? Ev.pctForKm(S.ev, km) : 0;
+  }
+
+  /* Battery after each leg of the current route, or null when EV planning is off or the numbers are unusable. */
+  function evProfile(pend) {
+    if (!S.ev.enabled || Ev.problem(S.ev) || !S.route || !S.route.legs || !S.route.legs.length) return null;
+    var kinds = pend.map(function () { return 'stop'; });
+    if (activeCharger()) kinds.push('charger');
+    if (S.returnHome) kinds.push('home');
+    if (S.route.legs.length < kinds.length) return null;
+    return Ev.profile(S.ev, S.route.legs.slice(0, kinds.length), kinds, S.ev.pct - usedPct());
+  }
+
+  function battChip(p) {
+    if (!p) return '';
+    var v = Math.max(0, Math.round(p.arrivePct));
+    return '<span class="batt' + (p.empty ? ' empty' : p.low ? ' low' : '') + '" title="Battery on arrival">' + v + '%</span>';
+  }
+
   function renderRoute() {
     if (!S.route) {
       viewEl.innerHTML = '<div class="empty">Finding the roads…</div>';
@@ -508,14 +663,53 @@
       return;
     }
     var pend = pendingOrdered();
-    var userKm = Solver.orderKm(S.start, S.stops.filter(function (s) { return !s.done; }), S.stops.filter(function (s) { return !s.done; }).map(function (s) { return s.id; }), S.returnHome);
-    var estNow = Solver.orderKm(S.start, pend, pend.map(function (s) { return s.id; }), S.returnHome);
+    var allPend = S.stops.filter(function (s) { return !s.done; });
+    var ch = activeCharger();
+    var userKm = Solver.orderKm(originPoint(), allPend, allPend.map(function (s) { return s.id; }), S.returnHome, ch);
+    var estNow = Solver.orderKm(originPoint(), pend, pend.map(function (s) { return s.id; }), S.returnHome, ch);
     var saving = userKm - estNow;
+    var prof = evProfile(pend);
+    var names = pend.map(function (s) { return s.name; }).concat(ch ? [ch.name] : [], S.returnHome ? ['home'] : []);
+
+    var evNote = '';
+    if (S.ev.enabled) {
+      var bad = Ev.problem(S.ev);
+      if (bad) evNote = '<div class="status bad">' + esc(bad) + '</div>';
+      else if (prof) {
+        if (prof.firstEmpty >= 0) evNote = '<div class="status bad">The battery would run out before ' + esc(names[prof.firstEmpty]) + '. Start with more charge, or charge before you leave.</div>';
+        else if (prof.firstLow >= 0) evNote = '<div class="status">The battery would drop below ' + Math.round(S.ev.reservePct) + '% by ' + esc(names[prof.firstLow]) + '.</div>';
+        else {
+          var lastP = prof.points[prof.points.length - 1];
+          var end = lastP.afterPct != null ? lastP.afterPct : lastP.arrivePct;
+          evNote = '<div class="status ok">Battery is fine. ' + (S.returnHome ? 'You get home with about ' : 'You finish with about ') + Math.round(end) + '%.</div>';
+        }
+      }
+    }
+
+    function extraRow(cls, mark, title, sub) {
+      return '<li><span class="num ' + cls + '">' + mark + '</span><div class="mid"><span style="font-weight:500">' + title + '</span><span class="leg">' + sub + '</span></div></li>';
+    }
+    var tail = '';
+    var legAt = pend.length;
+    if (ch) {
+      var cp = prof && prof.points[legAt];
+      tail += extraRow('ev', 'E', 'Charge: ' + esc(ch.name),
+        esc(S.route.legs[legAt] != null ? fmtKm(S.route.legs[legAt]) : '') + (ch.kw ? ' · up to ' + ch.kw + ' kW' : '') +
+        (cp ? ' ' + battChip(cp) + ' → ' + Math.round(cp.afterPct) + '%' : ''));
+      legAt++;
+    }
+    if (S.returnHome) {
+      var hp = prof && prof.points[legAt];
+      tail += extraRow('home', 'S', 'Back home', esc(S.route.legs[legAt] != null ? fmtKm(S.route.legs[legAt]) : '') + (hp ? ' ' + battChip(hp) : ''));
+    }
+
     viewEl.innerHTML =
       '<div class="head"><h1>Best route</h1>' + (saving > 0.5 ? '<span class="badge">Saves about ' + fmtKm(saving) + '</span>' : '') + '</div>' +
-      '<div class="tiles"><div class="tile"><div class="k">Distance</div><div class="v">' + fmtKm(S.route.km) + '</div></div>' +
+      '<div class="tiles' + (prof ? ' four' : '') + '"><div class="tile"><div class="k">Distance</div><div class="v">' + fmtKm(S.route.km) + '</div></div>' +
       '<div class="tile"><div class="k">Driving</div><div class="v">' + fmtTime(S.route.seconds) + '</div></div>' +
-      '<div class="tile"><div class="k">Stops</div><div class="v">' + pend.length + '</div></div></div>' +
+      '<div class="tile"><div class="k">Stops</div><div class="v">' + pend.length + '</div></div>' +
+      (prof ? '<div class="tile"><div class="k">Battery used</div><div class="v">' + Math.round(prof.totalPct) + '%</div></div>' : '') + '</div>' +
+      evNote +
       (S.route.source === 'estimate'
         ? '<div class="status">' + (S.provider === 'google' ? 'Road distances are an estimate. Turn on the Routes API for this key to get exact roads and times.' : 'The free road service did not answer, so distances are straight-line estimates. Tap Re-plan to try again.') + '</div>'
         : (S.provider === 'osm' ? '<div class="status ok">Road distances from OpenStreetMap. Times assume light traffic.</div>' : '')) +
@@ -523,16 +717,17 @@
         var s = byId(id); if (!s) return '';
         var pi = pend.indexOf(s);
         var leg = pi >= 0 && S.route.legs[pi] != null ? fmtKm(S.route.legs[pi]) : '';
+        var chip = pi >= 0 && prof ? ' ' + battChip(prof.points[pi]) : '';
         return '<li><span class="num' + (s.done ? ' done' : '') + '">' + (s.done ? '✓' : (i + 1)) + '</span>' +
           '<div class="mid"><span style="font-weight:500">' + esc(s.name) + (s.note ? ' <span class="pill" style="padding:2px 8px">' + esc(s.note) + '</span>' : '') + '</span>' +
-          '<span class="leg">' + esc(leg) + '</span></div>' +
+          '<span class="leg">' + esc(leg) + chip + '</span></div>' +
           (s.done ? '' :
             '<button class="lockchip' + (s.lock === 'first' ? ' on' : '') + '" data-act="lock" data-kind="first" data-id="' + s.id + '" type="button" aria-pressed="' + (s.lock === 'first') + '">First</button>' +
             '<button class="lockchip' + (s.lock === 'last' ? ' on' : '') + '" data-act="lock" data-kind="last" data-id="' + s.id + '" type="button" aria-pressed="' + (s.lock === 'last') + '">Last</button>' +
             '<button class="iconbtn sm" data-act="move" data-dir="-1" data-id="' + s.id + '" type="button" aria-label="Move ' + esc(s.name) + ' earlier"' + (i === 0 ? ' disabled' : '') + '>' + icon('up') + '</button>' +
             '<button class="iconbtn sm" data-act="move" data-dir="1" data-id="' + s.id + '" type="button" aria-label="Move ' + esc(s.name) + ' later"' + (i === S.order.length - 1 ? ' disabled' : '') + '>' + icon('down') + '</button>') +
           '</li>';
-      }).join('') + '</ol>' +
+      }).join('') + tail + '</ol>' +
       '<p class="muted" style="text-align:center">Lock a stop as First or Last, then Re-plan to keep it there.</p>' +
       '<div class="actions"><button class="btn" data-act="tostops" type="button">Edit stops</button><button class="btn" data-act="plan" type="button">Re-plan</button>' +
       '<button class="btn primary grow" data-act="toroad" type="button">Start delivering</button></div>';
@@ -561,21 +756,36 @@
     var done = S.order.filter(function (id) { var s = byId(id); return s && s.done; }).length;
     var head = '<div class="head"><h1>On the road</h1><span class="count">' + done + ' of ' + total + ' done</span></div>' +
       '<div class="bar"><div style="width:' + (total ? Math.round(done / total * 100) : 0) + '%"></div></div>';
+    var navIcon = icon('nav').replace('<svg', '<svg width="22" height="22"');
     if (!total) { viewEl.innerHTML = head + '<div class="empty">No route yet. Plan one first.</div><div class="actions"><button class="btn primary grow" data-act="tostops" type="button">Back to stops</button></div>'; return; }
     if (!pend.length) {
-      viewEl.innerHTML = head + '<div class="sheet next"><h2>All cards delivered</h2><p class="muted">Every home on this run is ticked off.' + (S.returnHome ? ' Drive safe back to the start.' : '') + '</p></div>' +
+      var ch = activeCharger();
+      if (ch && !S.chargeDone) {
+        viewEl.innerHTML = head +
+          '<div class="sheet next"><div class="eyebrow">Last stop: charge the car</div>' +
+          '<div><h2 style="font-size:28px">' + esc(ch.name) + '</h2><p class="muted" style="font-size:16px;margin-top:4px">' + esc(ch.address || ch.operator || '') + '</p></div>' +
+          '<div class="row" style="flex-wrap:wrap">' + (ch.kw ? '<span class="pill">Up to ' + ch.kw + ' kW</span>' : '') + '<span class="pill plain">Charge to ' + Math.round(S.ev.chargeTo) + '%</span></div>' +
+          '<a class="btn primary" target="_blank" rel="noopener" href="' + esc(Solver.mapsUrl(null, ch)) + '">' + navIcon + ' Navigate to the charger</a>' +
+          '<button class="btn good" data-act="charged" type="button">Charging done</button></div>' +
+          '<div class="actions"><button class="btn" data-act="undo" type="button">Undo last</button></div>';
+        return;
+      }
+      viewEl.innerHTML = head + '<div class="sheet next"><h2>All cards delivered</h2><p class="muted">Every home on this run is ticked off.' + (ch ? ' The car is charged.' : '') + (S.returnHome ? ' Drive safe back to the start.' : '') + '</p>' +
+        (S.returnHome ? '<a class="btn primary" target="_blank" rel="noopener" href="' + esc(Solver.mapsUrl(null, S.start)) + '">' + navIcon + ' Navigate home</a>' : '') + '</div>' +
         '<div class="actions"><button class="btn" data-act="undo" type="button">Undo last</button><button class="btn primary grow" data-act="newrun" type="button">Start a new run</button></div>';
       return;
     }
     var n = pend[0];
+    var prof = evProfile(pend);
     var legKm = S.route && S.route.legs && S.route.legs[0] != null ? fmtKm(S.route.legs[0]) : '';
+    var arrive = prof && prof.points[0] ? battChip(prof.points[0]) : '';
     var next9 = pend.slice(0, 9);
     var batchUrl = Solver.mapsUrl(null, next9[next9.length - 1], next9.slice(0, -1));
     viewEl.innerHTML = head +
       '<div class="sheet next"><div class="eyebrow">Next stop ' + (done + 1) + '</div>' +
       '<div><h2 style="font-size:28px">' + esc(n.name) + '</h2><p class="muted" style="font-size:16px;margin-top:4px">' + esc(n.address) + '</p></div>' +
-      '<div class="row" style="flex-wrap:wrap">' + (n.note ? '<span class="pill">' + esc(n.note) + '</span>' : '') + (legKm ? '<span class="pill plain">' + esc(legKm) + ' from previous</span>' : '') + '</div>' +
-      '<a class="btn primary" target="_blank" rel="noopener" href="' + esc(Solver.mapsUrl(null, n)) + '">' + icon('nav').replace('<svg', '<svg width="22" height="22"') + ' Navigate in Google Maps</a>' +
+      '<div class="row" style="flex-wrap:wrap">' + (n.note ? '<span class="pill">' + esc(n.note) + '</span>' : '') + (legKm ? '<span class="pill plain">' + esc(legKm) + ' from previous</span>' : '') + (arrive ? '<span class="pill plain">Battery on arrival ' + arrive + '</span>' : '') + '</div>' +
+      '<a class="btn primary" target="_blank" rel="noopener" href="' + esc(Solver.mapsUrl(null, n)) + '">' + navIcon + ' Navigate in Google Maps</a>' +
       '<div class="row"><button class="btn good grow" data-act="deliver" type="button">Delivered</button><button class="btn grow" data-act="skip" type="button">Skip for now</button></div></div>' +
       (pend.length > 1 ? '<div class="field"><div class="muted" style="font-weight:700">Coming up</div><ol class="list">' + pend.slice(1, 6).map(function (s, i) {
         return '<li><span class="num pend">' + (done + i + 2) + '</span><div class="mid"><span style="font-weight:500">' + esc(s.name) + '</span><span class="ad">' + esc(s.address) + '</span></div></li>';
@@ -586,6 +796,7 @@
 
   function deliver() {
     var n = pendingOrdered()[0]; if (!n) return;
+    n.legKm = S.route && S.route.legs && S.route.legs[0] != null ? S.route.legs[0] : 0;
     n.done = true; undoStack.push(n.id);
     S.route = null; save(); refreshRoute().then(function () { save(); if (S.view === 'road') { renderRoad(); drawMap(); } });
     renderRoad(); drawMap();
@@ -606,7 +817,8 @@
     }
     var s = id && byId(id);
     if (!s) { toast('Nothing to undo.'); return; }
-    s.done = false;
+    s.done = false; s.legKm = 0;
+    if (S.chargeDone) S.chargeDone = false;
     S.route = null; save(); refreshRoute().then(function () { save(); if (S.view === 'road') { renderRoad(); drawMap(); } });
     renderRoad(); drawMap();
   }
@@ -614,7 +826,10 @@
   /* ---------- backup ---------- */
 
   function backup() {
-    var data = JSON.stringify({ stops: S.stops, start: S.start, returnHome: S.returnHome, order: S.order }, null, 2);
+    var data = JSON.stringify({
+      stops: S.stops, start: S.start, returnHome: S.returnHome, order: S.order,
+      ev: S.ev, chargers: S.chargers.filter(function (c) { return c.manual; })
+    }, null, 2);
     var a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
     a.download = 'shubha-yatra-backup.json';
@@ -632,6 +847,11 @@
         });
         if (d.start && typeof d.start.lat === 'number' && typeof d.start.lng === 'number') S.start = d.start;
         S.returnHome = d.returnHome !== false;
+        if (d.ev && typeof d.ev === 'object') S.ev = Ev.withDefaults(d.ev);
+        if (Array.isArray(d.chargers)) {
+          var keep = S.chargers.filter(function (c) { return !c.manual; });
+          S.chargers = keep.concat(d.chargers.filter(function (c) { return c && c.manual && typeof c.lat === 'number' && typeof c.lng === 'number'; }));
+        }
         S.order = Array.isArray(d.order) ? d.order.filter(function (id) { return byId(id); }) : [];
         S.route = null; save(); renderStops(); drawMap();
         toast('Backup restored: ' + S.stops.length + ' stops');
@@ -650,6 +870,10 @@
       case 'connect': connect(); break;
       case 'provider': setProvider(t.dataset.val); break;
       case 'adjust': startAdjust(id); break;
+      case 'findchargers': findChargers(); break;
+      case 'addcharger': setPinMode(true, 'charger'); break;
+      case 'pickcharger': S.chargerId = id || null; S.route = null; save(); renderEv(); toast(id ? 'That charger will be used when you plan.' : 'The best charger will be chosen when you plan.'); break;
+      case 'charged': S.chargeDone = true; save(); renderRoad(); drawMap(); break;
       case 'locate': locate(); break;
       case 'tostops':
         if (!S.start) { toast('Set your start point first.'); return; }
@@ -668,7 +892,8 @@
       case 'undo': undo(); break;
       case 'newrun':
         if (confirm('Start a new run? This keeps your stops and marks them all as not delivered.')) {
-          S.stops.forEach(function (s) { s.done = false; });
+          S.stops.forEach(function (s) { s.done = false; s.legKm = 0; });
+          S.chargeDone = false; S.charger = null;
           S.route = null; S.order = []; undoStack = []; setView('stops');
         }
         break;
@@ -685,6 +910,14 @@
   viewEl.addEventListener('change', function (e) {
     var t = e.target;
     if (t.dataset.act === 'return') { S.returnHome = t.checked; S.route = null; save(); return; }
+    if (t.dataset.ev) {
+      var k = t.dataset.ev;
+      S.ev[k] = t.type === 'checkbox' ? t.checked : Number(t.value);
+      S.ev = Ev.withDefaults(S.ev);
+      S.route = null; save(); renderEv(); drawMap({ keep: true });
+      if ((k === 'enabled' || k === 'endAtCharger') && t.checked && S.ev.enabled && S.ev.endAtCharger && S.start && !S.chargers.some(function (c) { return !c.manual; })) findChargers();
+      return;
+    }
     if (t.id === 'restorefile' && t.files[0]) { restore(t.files[0]); t.value = ''; return; }
     if (t.dataset.field && t.dataset.id) {
       var s = byId(t.dataset.id);

@@ -156,3 +156,20 @@ details.help li{margin:4px 0}
 .approx{font-size:12px;font-weight:500;background:var(--gold-bg);color:var(--gold-ink);border-radius:8px;padding:2px 8px}
 .link.tiny{min-height:32px;padding:0;font-size:13px}
 .leaflet-container{font-family:'DM Sans',sans-serif}
+
+input[type=number]{width:100%;height:52px;border:1px solid var(--line);border-radius:12px;background:#fff;padding:0 14px;font:16px 'DM Sans',sans-serif;color:var(--ink)}
+.evbody{display:flex;flex-direction:column;gap:14px;margin-top:12px}
+.evgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+details.ev summary .badge{margin-left:8px}
+.chg .osmpick[aria-pressed="true"]{background:var(--gold-bg)}
+.tiles.four{grid-template-columns:repeat(4,1fr);gap:8px}
+.tiles.four .tile{padding:10px}
+.tiles.four .v{font-size:17px}
+.batt{display:inline-block;margin-left:6px;padding:0 7px;border-radius:8px;background:var(--green-bg);color:var(--green);font-size:12px;font-weight:700}
+.batt.low{background:var(--gold-bg);color:var(--gold-ink)}
+.batt.empty{background:#FBE4E2;color:var(--red)}
+.num.ev{background:#0B6E4F}
+.num.home{background:var(--ink)}
+
+[hidden]{display:none!important}
+.evgrid{align-items:end}

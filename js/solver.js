@@ -28,19 +28,26 @@
     };
   }
 
-  // Node 0 is the start point, nodes 1..n are the stops.
-  function buildMatrix(start, stops) {
-    var nodes = [start].concat(stops);
+  // Node 0 is the start point, nodes 1..n are the stops, node n+1 (optional) is a fixed final waypoint
+  // such as a charging station: after the last stop the route goes there, and then home.
+  function buildMatrix(start, stops, finish) {
+    var nodes = [start].concat(stops, finish ? [finish] : []);
     return nodes.map(function (a) {
       return nodes.map(function (b) { return haversine(a, b) * ROAD_FACTOR; });
     });
   }
 
-  function seqCost(seq, D, returnHome) {
+  function seqCost(seq, D, returnHome, tail) {
     if (!seq.length) return 0;
     var c = D[0][seq[0]];
     for (var k = 0; k + 1 < seq.length; k++) c += D[seq[k]][seq[k + 1]];
-    if (returnHome) c += D[seq[seq.length - 1]][0];
+    var last = seq[seq.length - 1];
+    if (tail) {
+      c += D[last][tail];
+      if (returnHome) c += D[tail][0];
+    } else if (returnHome) {
+      c += D[last][0];
+    }
     return c;
   }
 
@@ -64,8 +71,8 @@
   }
 
   // 2-opt and or-opt on seq[lo..hi]; positions outside that range are locked.
-  function improve(seq, D, returnHome, lo, hi, onBetter) {
-    var best = seqCost(seq, D, returnHome);
+  function improve(seq, D, returnHome, tail, lo, hi, onBetter) {
+    var best = seqCost(seq, D, returnHome, tail);
     var improved = true;
     var i, j, c, len, pos;
     while (improved) {
@@ -73,7 +80,7 @@
       for (i = lo; i < hi; i++) {
         for (j = i + 1; j <= hi; j++) {
           reverse(seq, i, j);
-          c = seqCost(seq, D, returnHome);
+          c = seqCost(seq, D, returnHome, tail);
           if (c < best - 1e-9) { best = c; improved = true; onBetter(c); }
           else reverse(seq, i, j);
         }
@@ -89,7 +96,7 @@
               if (pos === i && flip === 0) continue;
               var piece = flip ? seg.slice().reverse() : seg;
               var cand = rest.slice(0, pos).concat(piece, rest.slice(pos));
-              c = seqCost(cand, D, returnHome);
+              c = seqCost(cand, D, returnHome, tail);
               if (c < best - 1e-9) {
                 for (var k = 0; k < cand.length; k++) seq[k] = cand[k];
                 best = c; improved = true; moved = true; onBetter(c);
@@ -108,8 +115,10 @@
 
   /**
    * start: {lat,lng}; stops: [{id,lat,lng}]
-   * opts: {returnHome, firstId, lastId, userOrder:[ids]}
-   * Returns {order:[ids], km, userKm, history:[km...]} where history is the best-so-far km as the search ran.
+   * opts: {returnHome, firstId, lastId, userOrder:[ids], finish:{lat,lng}, restarts}
+   *   finish: a fixed last waypoint (a charger) visited after the final stop, before going home.
+   *   restarts: number of random restarts (default scales with the number of stops).
+   * Returns {order:[ids], km, userKm, history:[km...]}; km includes the leg to the finish point and home.
    */
   function planRoute(start, stops, opts) {
     opts = opts || {};
@@ -117,7 +126,8 @@
     var n = stops.length;
     if (!n) return { order: [], km: 0, userKm: 0, history: [0] };
 
-    var D = buildMatrix(start, stops);
+    var D = buildMatrix(start, stops, opts.finish);
+    var tail = opts.finish ? n + 1 : 0;
     var idOf = stops.map(function (s) { return s.id; });
     var nodeOf = {};
     idOf.forEach(function (id, k) { nodeOf[id] = k + 1; });
@@ -127,7 +137,7 @@
     if (firstNode && firstNode === lastNode) lastNode = 0;
 
     var userSeq = (opts.userOrder || idOf).filter(function (id) { return nodeOf[id]; }).map(function (id) { return nodeOf[id]; });
-    var userKm = seqCost(userSeq, D, returnHome);
+    var userKm = seqCost(userSeq, D, returnHome, tail);
 
     var lo = firstNode ? 1 : 0;
     var hi = lastNode ? n - 2 : n - 1;
@@ -137,22 +147,22 @@
     function note(c) { if (c < globalBest - 1e-9) { globalBest = c; history.push(c); } }
 
     var seq = nearestNeighbour(n, D, firstNode, lastNode);
-    note(seqCost(seq, D, returnHome));
-    improve(seq, D, returnHome, lo, hi, note);
+    note(seqCost(seq, D, returnHome, tail));
+    improve(seq, D, returnHome, tail, lo, hi, note);
     bestSeq = seq.slice();
-    globalBest = Math.min(globalBest, seqCost(seq, D, returnHome));
+    globalBest = Math.min(globalBest, seqCost(seq, D, returnHome, tail));
 
     var free = hi - lo + 1;
     if (free >= 4) {
       var rand = mulberry32(12345);
-      var restarts = n <= 40 ? 30 : n <= 100 ? 8 : 3;
+      var restarts = opts.restarts != null ? opts.restarts : (n <= 40 ? 30 : n <= 100 ? 8 : 3);
       for (var r = 0; r < restarts; r++) {
         var cand = seq.slice();
         for (var k = hi; k > lo; k--) {
           var m = lo + Math.floor(rand() * (k - lo + 1));
           var t = cand[k]; cand[k] = cand[m]; cand[m] = t;
         }
-        var c = improve(cand, D, returnHome, lo, hi, function () {});
+        var c = improve(cand, D, returnHome, tail, lo, hi, function () {});
         if (c < globalBest - 1e-9) { globalBest = c; bestSeq = cand.slice(); history.push(c); }
       }
     }
@@ -165,15 +175,51 @@
     };
   }
 
-  /** Estimated km for an explicit order of ids (used after the user reorders by hand). */
-  function orderKm(start, stops, order, returnHome) {
+  /** Estimated km for an explicit order of ids; optional finish waypoint (charger) before going home. */
+  function orderKm(start, stops, order, returnHome, finish) {
     var byId = {};
     stops.forEach(function (s) { byId[s.id] = s; });
     var pts = [start].concat(order.map(function (id) { return byId[id]; }).filter(Boolean));
+    if (finish) pts.push(finish);
     var km = 0;
     for (var k = 0; k + 1 < pts.length; k++) km += haversine(pts[k], pts[k + 1]) * ROAD_FACTOR;
     if (returnHome !== false && pts.length > 1) km += haversine(pts[pts.length - 1], pts[0]) * ROAD_FACTOR;
     return km;
+  }
+
+  /**
+   * Pick the charger to finish at: the one that makes the whole trip (all stops, then the charger, then home)
+   * shortest. Candidates are the chargers with the least extra distance for some final stop, then each is solved.
+   * opts as planRoute, plus {chargerId} to force one. Returns {charger, result, tried:[{id,km}]} or null.
+   */
+  function chooseCharger(start, stops, chargers, opts) {
+    opts = opts || {};
+    if (!chargers || !chargers.length || !stops.length) return null;
+    var returnHome = opts.returnHome !== false;
+    var pool = chargers;
+    if (opts.chargerId) {
+      pool = chargers.filter(function (c) { return c.id === opts.chargerId; });
+      if (!pool.length) pool = chargers;
+    }
+    var scored = pool.map(function (c) {
+      var best = Infinity;
+      stops.forEach(function (s) {
+        var extra = haversine(s, c) + (returnHome ? haversine(c, start) - haversine(s, start) : 0);
+        if (extra < best) best = extra;
+      });
+      return { c: c, extra: best };
+    }).sort(function (a, b) { return a.extra - b.extra; });
+    var cands = (opts.chargerId && pool.length === 1 ? scored : scored.slice(0, 8));
+
+    var fast = Object.assign({}, opts, { restarts: stops.length <= 40 ? 6 : 1 });
+    var tried = [], bestC = null, bestKm = Infinity;
+    cands.forEach(function (x) {
+      var res = planRoute(start, stops, Object.assign({}, fast, { finish: x.c }));
+      tried.push({ id: x.c.id, km: res.km });
+      if (res.km < bestKm - 1e-9) { bestKm = res.km; bestC = x.c; }
+    });
+    var full = planRoute(start, stops, Object.assign({}, opts, { finish: bestC }));
+    return { charger: bestC, result: full, tried: tried };
   }
 
   /**
@@ -203,7 +249,7 @@
   }
 
   return {
-    haversine: haversine, planRoute: planRoute, orderKm: orderKm, chunkWithOverlap: chunkWithOverlap,
-    mapsUrl: mapsUrl, ROAD_FACTOR: ROAD_FACTOR
+    haversine: haversine, planRoute: planRoute, orderKm: orderKm, chooseCharger: chooseCharger,
+    chunkWithOverlap: chunkWithOverlap, mapsUrl: mapsUrl, ROAD_FACTOR: ROAD_FACTOR
   };
 });
