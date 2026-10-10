@@ -132,3 +132,27 @@ details.help li{margin:4px 0}
 .dlg form{display:flex;flex-direction:column;gap:12px}
 
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+.lbl{font-size:14px;font-weight:700}
+.seg{display:grid;grid-template-columns:1fr 1fr;gap:4px;background:#EFE8DC;border-radius:14px;padding:4px}
+.seg button{height:44px;border:0;border-radius:11px;background:transparent;color:var(--muted);font:500 15px 'DM Sans',sans-serif;cursor:pointer}
+.seg button[aria-pressed="true"]{background:#fff;color:var(--maroon);font-weight:700;box-shadow:0 0 0 1px var(--line)}
+
+.pinhint{display:flex;align-items:center;gap:10px;max-width:calc(100% - 24px)}
+.pinbtn{height:30px;padding:0 12px;border:0;border-radius:15px;background:#fff;color:var(--maroon);font:700 13px 'DM Sans',sans-serif;cursor:pointer}
+
+.lpin-wrap{background:transparent;border:0}
+.lpin{border-radius:50%;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font:700 12px 'DM Sans',sans-serif;box-sizing:border-box;box-shadow:0 1px 3px rgba(0,0,0,.35)}
+
+.osmsearch{display:flex;flex-direction:column;gap:6px}
+.osmsearch .row .osminput{flex:1;min-width:0}
+.osmmsg:empty{display:none}
+.osmres{box-shadow:0 6px 18px rgba(43,29,26,.12)}
+.osmres li{padding:0!important}
+.osmpick{width:100%;text-align:left;border:0;background:transparent;padding:10px 14px;min-height:48px;display:flex;flex-direction:column;gap:2px;font:inherit;color:inherit;cursor:pointer}
+.osmpick:hover{background:#FBF7F0}
+.osmname{font-weight:500}
+.fix{display:flex;align-items:center;gap:8px;margin-top:2px}
+.approx{font-size:12px;font-weight:500;background:var(--gold-bg);color:var(--gold-ink);border-radius:8px;padding:2px 8px}
+.link.tiny{min-height:32px;padding:0;font-size:13px}
+.leaflet-container{font-family:'DM Sans',sans-serif}

@@ -6,15 +6,20 @@ Plain HTML, CSS and JavaScript. No server, no build step, no login. Everything i
 
 ## Use it
 
-1. Open the site and paste your Google Maps key (see below), then tap **Connect**.
+1. Open the site. The **Free map, no key** option works straight away. (Choose **Google Maps** and paste a key if you want better house-level search.)
 2. Set the start point (usually home) and whether the route ends back there.
-3. Add stops: search a name or address, drop a pin on the map, or paste a list (one per line, optionally `Name | address`).
+3. Add stops: search a name or address and press Enter, drop a pin on the map, or paste a list (one per line, optionally `Name | address`). A pasted map link or coordinates such as `15.3647, 75.1160` also work. Short `maps.app.goo.gl` links cannot be read; use the long link.
+   Stops the free search could only place by area are tagged **Area only**. Tap **Place pin exactly** and drag the pin (or tap the map) onto the house.
 4. Tap **Plan best route**. Reorder or lock a stop as **First** or **Last** and re-plan if needed.
 5. Tap **Start delivering**. **Navigate** opens Google Maps to the next home; tick **Delivered** as you go. **Skip for now** moves a home to the end. **Undo last** reverses a tick.
 
 Use **Save backup** to download your stops as a file and **Restore backup** to load them on another phone.
 
-## Google Maps key
+## Free map or Google
+
+The default is OpenStreetMap: Leaflet map, Nominatim search and the public OSRM road server. No key, no billing. It finds areas and landmarks well and house numbers poorly, and OSRM times assume light traffic (scaled up 25%). The public servers ask for light use, so searches are spaced one second apart.
+
+## Google Maps key (optional)
 
 Create a project at console.cloud.google.com, turn on billing (Google's monthly free credit covers a few hundred stops), and enable:
 
@@ -32,12 +37,14 @@ Create an API key and, under restrictions, limit it to websites and add this sit
 ## Tests
 
 ```bash
-node --test tests/solver.test.js
+node --test tests/solver.test.js tests/geo.test.js
 ```
 
 ## Files
 
 - `index.html`, `css/style.css`: the page
 - `js/solver.js`: route ordering (no browser needed)
-- `js/maps.js`: Google Maps wrapper
+- `js/maps.js`: Google Maps provider
+- `js/osm.js`: free OpenStreetMap provider (same interface)
+- `js/geo.js`: reads positions from pasted map links and coordinates
 - `js/app.js`: screens and saved state

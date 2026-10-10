@@ -4,7 +4,10 @@
   var STORE = 'shubha-yatra-v1';
   var VIEWS = ['setup', 'stops', 'planning', 'route', 'road'];
   var S = load();
+  var G = S.provider === 'google' ? Gmaps : Osm;
   var mapReady = false;
+  var adjustId = null;
+  var adjustOff = null;
   var pinMode = false;
   var stopPinListener = null;
   var undoStack = [];
@@ -16,7 +19,7 @@
   /* ---------- state ---------- */
 
   function blank() {
-    return { apiKey: '', start: null, returnHome: true, stops: [], order: [], route: null, view: 'setup' };
+    return { provider: 'osm', apiKey: '', start: null, returnHome: true, stops: [], order: [], route: null, view: 'setup' };
   }
   function load() {
     var s = blank();
@@ -24,6 +27,8 @@
       var raw = JSON.parse(localStorage.getItem(STORE) || 'null');
       if (raw && typeof raw === 'object') {
         s = Object.assign(s, raw);
+        if (!raw.provider) s.provider = raw.apiKey ? 'google' : 'osm';
+        if (s.provider !== 'google') s.provider = 'osm';
         if (!Array.isArray(s.stops)) s.stops = [];
         if (!Array.isArray(s.order)) s.order = [];
       }
@@ -85,11 +90,11 @@
     ({ setup: renderSetup, stops: renderStops, planning: renderPlanning, route: renderRoute, road: renderRoad })[S.view]();
     viewEl.parentNode.scrollTop = 0;
     if (S.view !== 'setup' && mapReady) {
-      Gmaps.showMap($('#map'), S.start);
-      Gmaps.resize();
+      G.showMap($('#map'), S.start);
+      G.resize();
       drawMap();
     }
-    if (S.view !== 'stops') setPinMode(false);
+    if (S.view !== 'stops') { setPinMode(false); if (adjustId) endAdjust(); }
   }
 
   /* ---------- map drawing ---------- */
@@ -101,9 +106,9 @@
   function drawMap(opts) {
     if (!mapReady) return;
     opts = opts || {};
-    Gmaps.clearOverlays();
+    G.clearOverlays();
     var pts = [];
-    if (S.start) { Gmaps.addMarker(S.start, { fill: '#8E1F3A', scale: 13, label: 'S', title: 'Start', z: 5 }); pts.push(S.start); }
+    if (S.start) { G.addMarker(S.start, { fill: '#8E1F3A', scale: 13, label: 'S', title: 'Start', z: 5 }); pts.push(S.start); }
     var ordered = S.route ? S.order : [];
     var pend = pendingOrdered();
     var nextId = S.view === 'road' && pend[0] ? pend[0].id : null;
@@ -114,20 +119,21 @@
       else if (s.id === nextId) { o.fill = '#B7791F'; o.scale = 14; o.z = 4; o.label = String(pend.indexOf(s) + 1 + doneCount()); }
       else if (idx >= 0) { o.fill = '#8E1F3A'; o.label = String(idx + 1); }
       else { o.fill = '#ffffff'; o.stroke = '#8E1F3A'; o.scale = 9; }
-      Gmaps.addMarker(s, o);
+      if (s.id === adjustId) { o.fill = '#B7791F'; o.scale = 14; o.z = 6; o.label = '+'; o.draggable = true; o.onDrag = moveAdjusted; }
+      G.addMarker(s, o);
       pts.push(s);
     });
     if (opts.messy && opts.messy.length) {
       var path = [S.start].concat(opts.messy);
       if (S.returnHome) path.push(S.start);
-      Gmaps.addLine(path, {
+      G.addLine(path, {
         strokeOpacity: 0, strokeColor: '#B3261E',
         icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 0.7, scale: 3 }, offset: '0', repeat: '12px' }]
       });
     } else if (S.route && S.route.path && (S.view === 'route' || S.view === 'road')) {
-      Gmaps.addLine(S.route.path);
+      G.addLine(S.route.path);
     }
-    Gmaps.fit(pts);
+    if (!opts.keep) G.fit(pts);
   }
 
   function doneCount() { return S.stops.filter(function (s) { return s.done; }).length; }
@@ -136,22 +142,28 @@
 
   function renderSetup() {
     var connected = mapReady;
+    var google = S.provider === 'google';
     viewEl.innerHTML =
       '<div class="field" style="gap:12px">' +
       '<h1>Plan your card run</h1>' +
       '<p class="muted" style="font-size:16px">Add every home you need to visit. You get the shortest order, so you never drive back and forth.</p></div>' +
-      '<div class="field"><label for="key">Google Maps key</label>' +
-      '<div class="row"><input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="AIzaSy..." value="' + esc(S.apiKey) + '">' +
-      '<button class="btn small" data-act="connect" type="button">' + (connected ? 'Reconnect' : 'Connect') + '</button></div>' +
-      '<div id="keystatus" class="status' + (connected ? ' ok' : '') + '"' + (connected ? '' : ' hidden') + '>' + (connected ? 'Connected to Google Maps' : '') + '</div>' +
-      '<span class="muted">Saved only on this device. Never sent anywhere except to Google.</span></div>' +
-      '<details class="help"><summary>How to get a key</summary><ol>' +
-      '<li>Open <strong>console.cloud.google.com</strong> and create a project. Turn on billing (Google gives a monthly free credit that covers a few hundred stops).</li>' +
-      '<li>In APIs and services, enable: <strong>Maps JavaScript API</strong>, <strong>Places API (New)</strong>, <strong>Geocoding API</strong> and <strong>Routes API</strong>.</li>' +
-      '<li>Create an API key. Under restrictions, limit it to websites and add this page\'s address.</li>' +
-      '<li>Paste the key above and tap Connect.</li></ol></details>' +
+      '<div class="field"><span class="lbl">Map</span><div class="seg" role="group" aria-label="Map">' +
+      '<button type="button" data-act="provider" data-val="osm" aria-pressed="' + !google + '">Free map, no key</button>' +
+      '<button type="button" data-act="provider" data-val="google" aria-pressed="' + google + '">Google Maps</button></div>' +
+      '<span class="muted">' + (google ? 'Better at finding exact house addresses. Needs a Google key.' : 'OpenStreetMap. Works at once. Finds areas and landmarks well; for an exact house, drag the pin.') + '</span></div>' +
+      (google ?
+        '<div class="field"><label for="key">Google Maps key</label>' +
+        '<div class="row"><input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="AIzaSy..." value="' + esc(S.apiKey) + '">' +
+        '<button class="btn small" data-act="connect" type="button">' + (connected ? 'Reconnect' : 'Connect') + '</button></div>' +
+        '<div id="keystatus" class="status' + (connected ? ' ok' : '') + '"' + (connected ? '' : ' hidden') + '>' + (connected ? 'Connected to Google Maps' : '') + '</div>' +
+        '<span class="muted">Saved only on this device. Never sent anywhere except to Google.</span></div>' +
+        '<details class="help"><summary>How to get a key</summary><ol>' +
+        '<li>Open <strong>console.cloud.google.com</strong> and create a project. Turn on billing (Google gives a monthly free credit that covers a few hundred stops).</li>' +
+        '<li>In APIs and services, enable: <strong>Maps JavaScript API</strong>, <strong>Places API (New)</strong>, <strong>Geocoding API</strong> and <strong>Routes API</strong>.</li>' +
+        '<li>Create an API key. Under restrictions, limit it to websites and add this page\'s address.</li>' +
+        '<li>Paste the key above and tap Connect.</li></ol></details>' : '') +
       '<div class="field"><label for="startbox">Start point</label>' +
-      '<div id="startbox">' + (connected ? '' : '<div class="muted">Connect your key first.</div>') + '</div>' +
+      '<div id="startbox">' + (connected ? '' : '<div class="muted">' + (google ? 'Connect your key first.' : 'Loading the map…') + '</div>') + '</div>' +
       '<div id="startchosen" class="chosen">' + startChosenHtml() + '</div>' +
       '<div><button class="btn small" data-act="locate" type="button" ' + (connected ? '' : 'aria-disabled="true"') + '>' + icon('locate').replace('<svg', '<svg width="18" height="18"') + ' Use my location</button></div></div>' +
       '<label class="switch"><span><span style="font-weight:500;display:block">Return to start</span><span class="muted">End the route back home</span></span>' +
@@ -167,7 +179,7 @@
   async function mountStartBox() {
     var box = $('#startbox');
     if (!box) return;
-    var el = await Gmaps.createSearchBox(function (p, err) {
+    var el = await G.createSearchBox(function (p, err) {
       if (!p) { toast('Could not read that place. Try again.'); return; }
       S.start = { lat: p.lat, lng: p.lng, name: p.name, address: p.address || p.name };
       save();
@@ -177,13 +189,23 @@
     box.appendChild(el);
   }
 
+  function setProvider(name) {
+    name = name === 'google' ? 'google' : 'osm';
+    if (S.provider === name) return;
+    S.provider = name;
+    S.view = 'setup';
+    save();
+    // Each provider owns its own map object, so start clean rather than mixing two on one element.
+    location.reload();
+  }
+
   async function connect() {
     var key = $('#key').value.trim();
     var st = $('#keystatus');
     if (!key) { st.hidden = false; st.className = 'status bad'; st.textContent = 'Paste your Google Maps key first.'; return; }
     st.hidden = false; st.className = 'status'; st.textContent = 'Connecting…';
     try {
-      await Gmaps.init(key);
+      await G.init(key);
       S.apiKey = key; mapReady = true; save();
       st.className = 'status ok'; st.textContent = 'Connected to Google Maps';
       mountStartBox();
@@ -199,7 +221,7 @@
     navigator.geolocation.getCurrentPosition(async function (pos) {
       var p = { lat: pos.coords.latitude, lng: pos.coords.longitude };
       var address = 'My location';
-      try { address = (await Gmaps.reverseGeocode(p)).address; } catch (e) { /* keep the label */ }
+      try { address = (await G.reverseGeocode(p)).address; } catch (e) { /* keep the label */ }
       S.start = { lat: p.lat, lng: p.lng, name: 'My location', address: address };
       save();
       var c = $('#startchosen'); if (c) c.innerHTML = startChosenHtml();
@@ -229,9 +251,9 @@
   async function mountSearch() {
     var box = $('#searchbox');
     if (!box || !mapReady) return;
-    var el = await Gmaps.createSearchBox(function (p) {
+    var el = await G.createSearchBox(function (p) {
       if (!p) { toast('Could not read that place. Try again.'); return; }
-      addStop({ name: p.name, address: p.address, lat: p.lat, lng: p.lng });
+      addStop({ name: p.name, address: p.address, lat: p.lat, lng: p.lng, approx: !!p.approx });
     }, S.start);
     box.innerHTML = '';
     box.appendChild(el);
@@ -249,7 +271,9 @@
     }
     list.innerHTML = S.stops.map(function (s, i) {
       return '<li><div class="mid"><input class="nm" type="text" value="' + esc(s.name) + '" data-field="name" data-id="' + s.id + '" aria-label="Name of stop ' + (i + 1) + '">' +
-        '<span class="ad">' + esc(s.address) + '</span></div>' +
+        '<span class="ad">' + esc(s.address) + '</span>' +
+        '<span class="fix">' + (s.approx ? '<span class="approx">Area only</span>' : '') +
+        '<button type="button" class="link tiny" data-act="adjust" data-id="' + s.id + '">' + (s.approx ? 'Place pin exactly' : 'Adjust pin') + '</button></span></div>' +
         '<input class="note" type="text" value="' + esc(s.note) + '" placeholder="Note" data-field="note" data-id="' + s.id + '" aria-label="Note for ' + esc(s.name) + '">' +
         '<button class="iconbtn sm" data-act="remove" data-id="' + s.id + '" type="button" aria-label="Remove ' + esc(s.name) + '">' + icon('x') + '</button></li>';
     }).join('');
@@ -258,7 +282,7 @@
 
   function addStop(p) {
     var name = (p.name || '').trim() || (p.address || 'Stop').split(',')[0];
-    S.stops.push({ id: newId(), name: name, address: p.address || '', note: p.note || '', lat: p.lat, lng: p.lng, done: false, lock: null });
+    S.stops.push({ id: newId(), name: name, address: p.address || '', note: p.note || '', lat: p.lat, lng: p.lng, approx: !!p.approx, done: false, lock: null });
     invalidatePlan();
     save();
     renderStopList();
@@ -281,18 +305,62 @@
   function setPinMode(on) {
     pinMode = on;
     document.body.classList.toggle('pinning', on);
-    var hint = $('#pinhint'); if (hint) hint.hidden = !on;
+    if (on) showHint('Tap the map to add a stop', false); else if (!adjustId) showHint('', false);
     var btn = $('[data-act="pin"]');
     if (btn) { btn.classList.toggle('on', on); btn.setAttribute('aria-pressed', on); }
     if (stopPinListener) { stopPinListener(); stopPinListener = null; }
     if (on && mapReady) {
-      stopPinListener = Gmaps.onMapClick(async function (pos) {
+      stopPinListener = G.onMapClick(async function (pos) {
         var a = { name: 'Pinned spot', address: pos.lat.toFixed(5) + ', ' + pos.lng.toFixed(5) };
-        try { var g = await Gmaps.reverseGeocode(pos); a.address = g.address; a.name = g.address.split(',')[0]; } catch (e) { /* keep coordinates */ }
+        try { var g = await G.reverseGeocode(pos); a.address = g.address; a.name = g.address.split(',')[0]; } catch (e) { /* keep coordinates */ }
         addStop({ name: a.name, address: a.address, lat: pos.lat, lng: pos.lng });
         setPinMode(false);
       });
     }
+  }
+
+  /* ---------- place a pin exactly ---------- */
+
+  function showHint(text, withDone) {
+    var hint = $('#pinhint');
+    if (!hint) return;
+    hint.hidden = !text;
+    $('#pinhinttext').textContent = text;
+    $('#pinDone').hidden = !withDone;
+  }
+
+  function startAdjust(id) {
+    var s = byId(id);
+    if (!s || !mapReady) return;
+    setPinMode(false);
+    if (adjustOff) adjustOff();
+    adjustId = id;
+    showHint('Drag the pin, or tap the map, to the exact house. Then tap Done.', true);
+    drawMap({ keep: true });
+    G.panTo(s, 17);
+    document.getElementById('mapwrap').scrollIntoView({ block: 'nearest' });
+    adjustOff = G.onMapClick(moveAdjusted);
+  }
+
+  function moveAdjusted(pos) {
+    var s = byId(adjustId);
+    if (!s) return;
+    s.lat = pos.lat; s.lng = pos.lng; s.approx = false;
+    S.route = null;
+    save();
+    drawMap({ keep: true });
+  }
+
+  async function endAdjust() {
+    var s = byId(adjustId);
+    adjustId = null;
+    if (adjustOff) { adjustOff(); adjustOff = null; }
+    showHint('', false);
+    if (!s) return;
+    save();
+    renderStopList();
+    drawMap();
+    try { var g = await G.reverseGeocode(s); s.address = g.address; save(); renderStopList(); } catch (e) { /* keep the old address text */ }
   }
 
   /* ---------- paste a list ---------- */
@@ -315,8 +383,17 @@
       var name = parts.length > 1 ? parts[0].trim() : '';
       var addr = (parts.length > 1 ? parts.slice(1).join(' ') : parts[0]).trim();
       try {
-        var g = await Gmaps.geocodeAddress(addr, S.start);
-        addStop({ name: name || addr.split(',')[0], address: g.address, lat: g.lat, lng: g.lng });
+        var pos = Geo.parseLatLng(addr);
+        var g;
+        if (pos) {
+          g = { address: pos.lat.toFixed(5) + ', ' + pos.lng.toFixed(5), lat: pos.lat, lng: pos.lng, approx: false };
+          try { var rg = await G.reverseGeocode(pos); g.address = rg.address; } catch (e2) { /* keep coordinates */ }
+        } else if (Geo.isShortLink(addr)) {
+          throw new Error('short link');
+        } else {
+          g = await G.geocodeAddress(addr, S.start);
+        }
+        addStop({ name: name || g.address.split(',')[0], address: g.address, lat: g.lat, lng: g.lng, approx: !!g.approx });
         added++;
       } catch (e) { failed.push(lines[i]); }
       await sleep(120);
@@ -410,9 +487,9 @@
     }
     var route = { km: km, seconds: Math.round(km / 25 * 3600), legs: legs, path: pts.map(function (p) { return { lat: p.lat, lng: p.lng }; }), source: 'estimate' };
     try {
-      var chunks = Solver.chunkWithOverlap(pts, 25), path = [], meters = 0, seconds = 0, rl = [];
+      var chunks = Solver.chunkWithOverlap(pts, G.maxRoutePoints || 25), path = [], meters = 0, seconds = 0, rl = [];
       for (var c = 0; c < chunks.length; c++) {
-        var r = await Gmaps.roadRoute(chunks[c]);
+        var r = await G.roadRoute(chunks[c]);
         path = path.concat(r.path); meters += r.meters; seconds += r.seconds;
         r.legs.forEach(function (l) { rl.push(l.meters / 1000); });
       }
@@ -439,7 +516,9 @@
       '<div class="tiles"><div class="tile"><div class="k">Distance</div><div class="v">' + fmtKm(S.route.km) + '</div></div>' +
       '<div class="tile"><div class="k">Driving</div><div class="v">' + fmtTime(S.route.seconds) + '</div></div>' +
       '<div class="tile"><div class="k">Stops</div><div class="v">' + pend.length + '</div></div></div>' +
-      (S.route.source === 'estimate' ? '<div class="status">Road distances are an estimate. Turn on the Routes API for this key to get exact roads and times.</div>' : '') +
+      (S.route.source === 'estimate'
+        ? '<div class="status">' + (S.provider === 'google' ? 'Road distances are an estimate. Turn on the Routes API for this key to get exact roads and times.' : 'The free road service did not answer, so distances are straight-line estimates. Tap Re-plan to try again.') + '</div>'
+        : (S.provider === 'osm' ? '<div class="status ok">Road distances from OpenStreetMap. Times assume light traffic.</div>' : '')) +
       '<ol class="list" id="routelist">' + S.order.map(function (id, i) {
         var s = byId(id); if (!s) return '';
         var pi = pend.indexOf(s);
@@ -569,6 +648,8 @@
     var act = t.dataset.act, id = t.dataset.id;
     switch (act) {
       case 'connect': connect(); break;
+      case 'provider': setProvider(t.dataset.val); break;
+      case 'adjust': startAdjust(id); break;
       case 'locate': locate(); break;
       case 'tostops':
         if (!S.start) { toast('Set your start point first.'); return; }
@@ -611,14 +692,18 @@
     }
   });
 
+  $('#pinDone').addEventListener('click', endAdjust);
   $('#pastego').addEventListener('click', runPaste);
   $('#pastecancel').addEventListener('click', function () { $('#pastedlg').close(); });
 
   /* ---------- boot ---------- */
 
   async function boot() {
-    if (S.apiKey) {
-      try { await Gmaps.init(S.apiKey); mapReady = true; }
+    if (S.provider === 'osm') {
+      try { await G.init(); mapReady = true; }
+      catch (e) { mapReady = false; S.view = 'setup'; toast(e.message || 'Could not load the map.'); }
+    } else if (S.apiKey) {
+      try { await G.init(S.apiKey); mapReady = true; }
       catch (e) { mapReady = false; S.view = 'setup'; toast(e.message || 'Could not connect to Google Maps.'); }
     } else {
       S.view = 'setup';

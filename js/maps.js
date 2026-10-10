@@ -55,8 +55,12 @@
       map: map, position: pos, title: opts.title || '',
       icon: circleIcon(opts.fill, opts.scale || 11, opts.stroke),
       label: opts.label ? { text: String(opts.label), color: opts.textColor || '#ffffff', fontWeight: '700', fontSize: '12px' } : undefined,
-      zIndex: opts.z || 1
+      zIndex: opts.z || 1, draggable: !!opts.draggable
     });
+    if (opts.draggable && opts.onDrag) {
+      m.addListener('dragend', function (e) { opts.onDrag({ lat: e.latLng.lat(), lng: e.latLng.lng() }); });
+    }
+    m.__setPos = function (p) { m.setPosition(p); };
     overlays.push(m);
     return m;
   }
@@ -73,6 +77,12 @@
     points.forEach(function (p) { b.extend(p); });
     map.fitBounds(b, 48);
     google.maps.event.addListenerOnce(map, 'idle', function () { if (map.getZoom() > 17) map.setZoom(17); });
+  }
+
+  function panTo(pos, zoom) {
+    if (!map) return;
+    map.setCenter(pos);
+    map.setZoom(zoom || 17);
   }
 
   function onMapClick(handler) {
@@ -116,7 +126,11 @@
     var res = await g.geocode(request);
     if (!res.results || !res.results.length) throw new Error('No match found');
     var r = res.results[0];
-    return { address: r.formatted_address, lat: r.geometry.location.lat(), lng: r.geometry.location.lng() };
+    var lt = r.geometry.location_type;
+    return {
+      address: r.formatted_address, lat: r.geometry.location.lat(), lng: r.geometry.location.lng(),
+      approx: lt === 'APPROXIMATE' || lt === 'GEOMETRIC_CENTER'
+    };
   }
 
   function geocodeAddress(text, bias) {
@@ -176,8 +190,9 @@
   }
 
   root.Gmaps = {
+    id: 'google', maxRoutePoints: 25,
     init: init, showMap: showMap, clearOverlays: clearOverlays, addMarker: addMarker, addLine: addLine,
-    fit: fit, onMapClick: onMapClick, resize: resize, createSearchBox: createSearchBox,
+    fit: fit, panTo: panTo, onMapClick: onMapClick, resize: resize, createSearchBox: createSearchBox,
     geocodeAddress: geocodeAddress, reverseGeocode: reverseGeocode, roadRoute: roadRoute
   };
 })(window);
